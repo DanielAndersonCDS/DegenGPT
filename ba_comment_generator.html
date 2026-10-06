@@ -1,0 +1,180 @@
+
+<h2 class="sr-only">Blue Archive comment generator — enter a character name and optional description to generate a community-style comment via Ollama</h2>
+
+<div style="padding: 1.5rem 0 1rem;">
+
+  <div style="margin-bottom: 1.5rem;">
+    <label style="font-size:13px; color:var(--color-text-secondary); display:block; margin-bottom:6px;">Character name</label>
+    <input type="text" id="charName" placeholder="e.g. Hina, Yuuka, Aris..." style="width:100%; box-sizing:border-box;" />
+  </div>
+
+  <div style="margin-bottom: 1.5rem;">
+    <label style="font-size:13px; color:var(--color-text-secondary); display:block; margin-bottom:6px;">Description <span style="color:var(--color-text-tertiary);">(optional)</span></label>
+    <input type="text" id="charDesc" placeholder="e.g. shy student council president, posted a new art..." style="width:100%; box-sizing:border-box;" />
+  </div>
+
+  <div style="margin-bottom: 1.5rem;">
+    <label style="font-size:13px; color:var(--color-text-secondary); display:block; margin-bottom:6px;">Ollama base URL</label>
+    <input type="text" id="ollamaUrl" value="http://localhost:11434" style="width:100%; box-sizing:border-box;" />
+  </div>
+
+  <button id="genBtn" onclick="generate()" style="width:100%; padding:10px; font-size:14px; font-weight:500; cursor:pointer;">
+    Generate comment ↗
+  </button>
+
+  <div id="statusArea" style="margin-top:1rem; display:none;">
+    <div style="font-size:13px; color:var(--color-text-secondary); margin-bottom:8px;" id="statusText">Loading examples...</div>
+    <div style="background:var(--color-background-secondary); border-radius:var(--border-radius-lg); border:0.5px solid var(--color-border-tertiary); padding:1rem 1.25rem; min-height:60px; display:none;" id="resultBox">
+      <div style="font-size:13px; color:var(--color-text-secondary); margin-bottom:6px;">Generated comment</div>
+      <div style="font-size:15px; line-height:1.65; white-space:pre-wrap;" id="resultText"></div>
+    </div>
+    <div style="margin-top:0.75rem; display:none;" id="retryArea">
+      <button onclick="generate()" style="font-size:13px; cursor:pointer;">Try again ↗</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const DATASET_URL = 'https://huggingface.co/datasets/talktoyeet/cunnyScrape01/resolve/main/comments_data.csv';
+const MODEL = 'qwen2.5:1.5b';
+
+let cachedExamples = null;
+
+function parseCSV(text) {
+  const rows = [];
+  const lines = text.split('\n');
+  const headers = parseCSVLine(lines[0]);
+  const bodyIdx = headers.findIndex(h => h.toLowerCase().includes('comment_body'));
+  const titleIdx = headers.findIndex(h => h.toLowerCase().includes('submission_title'));
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCSVLine(lines[i]);
+    if (cols[bodyIdx] && cols[bodyIdx].length > 80) {
+      rows.push({ body: cols[bodyIdx], title: cols[titleIdx] || '' });
+    }
+  }
+  return rows;
+}
+
+function parseCSVLine(line) {
+  const result = [];
+  let cur = '', inQuote = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '"') {
+      if (inQuote && line[i+1] === '"') { cur += '"'; i++; }
+      else inQuote = !inQuote;
+    } else if (c === ',' && !inQuote) {
+      result.push(cur.trim()); cur = '';
+    } else cur += c;
+  }
+  result.push(cur.trim());
+  return result;
+}
+
+function pickRandom(arr, n) {
+  const shuffled = [...arr].sort(() => 0.5 - Math.random());
+  return shuffled.slice(0, n);
+}
+
+async function loadExamples() {
+  if (cachedExamples) return cachedExamples;
+  const res = await fetch(DATASET_URL);
+  if (!res.ok) throw new Error('Could not fetch dataset from HuggingFace');
+  const text = await res.text();
+  cachedExamples = parseCSV(text);
+  return cachedExamples;
+}
+
+async function generate() {
+  const name = document.getElementById('charName').value.trim();
+  const desc = document.getElementById('charDesc').value.trim();
+  const baseUrl = document.getElementById('ollamaUrl').value.trim().replace(/\/$/, '');
+
+  if (!name) {
+    alert('Please enter a character name first.');
+    return;
+  }
+
+  const statusArea = document.getElementById('statusArea');
+  const statusText = document.getElementById('statusText');
+  const resultBox = document.getElementById('resultBox');
+  const resultText = document.getElementById('resultText');
+  const retryArea = document.getElementById('retryArea');
+  const genBtn = document.getElementById('genBtn');
+
+  statusArea.style.display = 'block';
+  resultBox.style.display = 'none';
+  retryArea.style.display = 'none';
+  genBtn.disabled = true;
+  genBtn.textContent = 'Working...';
+
+  try {
+    statusText.textContent = 'Fetching dataset examples...';
+    const examples = await loadExamples();
+    const shots = pickRandom(examples, 6);
+
+    const fewShotBlock = shots.map((s, i) =>
+      `Example ${i+1}:\n[Post: "${s.title.slice(0,80)}"]\n[Comment: ${s.body.slice(0, 280)}]`
+    ).join('\n\n');
+
+    const userPrompt = desc
+      ? `Character name: ${name}\nDescription: ${desc}`
+      : `Character name: ${name}`;
+
+    const systemPrompt = `You are a Blue Archive community member on Reddit. Your job is to write ONE authentic community comment reacting to a post about a Blue Archive character.
+
+Study these real examples from the community — copy their energy, their emoji usage (😭💢👺), their running gags ("correction", "uohhh", "cunny", "UOOOGH", headpats, sensei), their chaotic all-caps screaming, their dramatic declarations of love, and their specific in-universe references. Write EXACTLY like them.
+
+${fewShotBlock}
+
+Rules:
+- Write only ONE comment, nothing else
+- Match the tone exactly: unhinged, loving, dramatic, funny
+- Use emojis the same way the examples do
+- Reference the character by name
+- Keep it 40-180 words
+- No disclaimers, no labels, just the raw comment`;
+
+    statusText.textContent = `Calling Ollama (${MODEL})...`;
+
+    const res = await fetch(`${baseUrl}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: MODEL,
+        stream: false,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ]
+      })
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Ollama error ${res.status}: ${err}`);
+    }
+
+    const data = await res.json();
+    const output = data.message?.content || data.response || '';
+
+    if (!output) throw new Error('Empty response from Ollama');
+
+    statusText.textContent = 'Done!';
+    resultText.textContent = output.trim();
+    resultBox.style.display = 'block';
+    retryArea.style.display = 'block';
+
+  } catch (err) {
+    statusText.textContent = `Error: ${err.message}`;
+    if (err.message.includes('fetch') || err.message.includes('network') || err.message.includes('Failed')) {
+      statusText.textContent += ' — Is Ollama running? Try: ollama serve';
+    }
+    retryArea.style.display = 'block';
+  } finally {
+    genBtn.disabled = false;
+    genBtn.textContent = 'Generate comment ↗';
+  }
+}
+</script>
